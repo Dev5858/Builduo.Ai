@@ -1,12 +1,14 @@
 from flask import Flask, request, jsonify
-import subprocess, shlex
+import requests
+import os
 
 app = Flask(__name__)
-MODEL = "gemma3:4b"  # Your local Ollama model
 
+# ✅ Model & API setup
+MODEL = "meta-llama/llama-3-8b-instruct:free"
+API_KEY = os.getenv("OPENROUTER_API_KEY")  # Render environment variable
 
-# 💬 AI Brain — ask Ollama locally
-def ask_ollama(prompt):
+def ask_ai(prompt):
     system_prompt = (
         "You are Builduo.ai — a smart, creative business assistant. "
         "When users ask for business, brand, or website ideas, respond instantly "
@@ -14,21 +16,37 @@ def ask_ollama(prompt):
         "Do not introduce yourself or ask clarifying questions. Just give results clearly."
     )
 
-    full_prompt = system_prompt + "\n\nUser: " + prompt
-    cmd = f"ollama run {shlex.quote(MODEL)} {shlex.quote(full_prompt)}"
-    print("🧠 Running:", cmd)
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    print("💬 Raw output:", result.stdout)
+    data = {
+        "model": MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ]
+    }
 
-    # Handle no response / Ollama error
-    if not result.stdout.strip():
-        return "⚠️ Ollama returned nothing. Make sure it's running and the model name is correct."
+    try:
+        response = requests.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers=headers,
+            json=data
+        )
 
-    return result.stdout.strip()
+        if response.status_code != 200:
+            return f"⚠️ API Error {response.status_code}: {response.text}"
+
+        res_json = response.json()
+        reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+        return reply.strip() or "⚠️ Model returned no reply."
+
+    except Exception as e:
+        return f"⚠️ Request failed: {str(e)}"
 
 
-# 🔗 API Endpoint — handle POST requests from your Wix site or curl
 @app.route("/chat", methods=["POST"])
 def chat():
     data = request.get_json()
@@ -36,28 +54,23 @@ def chat():
     if not prompt:
         return jsonify({"error": "No message provided"}), 400
 
-    reply = ask_ollama(prompt)
+    reply = ask_ai(prompt)
     return jsonify({"assistant": "Builduo.ai", "reply": reply})
 
 
-# 🏠 Root page — for browser visits (no 404)
 @app.route("/", methods=["GET"])
 def index():
     return (
-        "<h2>Builduo.ai</h2>"
-        "<p>✅ API is up and running.<br>"
-        "Use POST /chat with JSON {'message': '...'} to get AI responses.</p>"
+        "<h2>🤖 Builduo.ai is live!</h2>"
+        "<p>Use POST /chat with JSON {'message': '...'} to get AI-generated business ideas.</p>"
     )
 
 
-# 🖼️ Favicon handler — stops annoying 404s
 @app.route("/favicon.ico")
 def favicon():
     return "", 204
 
 
-# 🚀 Run server locally (Flask dev mode)
 if __name__ == "__main__":
-    print("🚀 Builduo.ai is now running at http://localhost:5000")
+    print("🚀 Builduo.ai running locally at http://localhost:5000")
     app.run(host="0.0.0.0", port=5000)
-
