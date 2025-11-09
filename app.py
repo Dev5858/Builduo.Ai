@@ -5,13 +5,14 @@ import os
 from waitress import serve
 
 app = Flask(__name__)
-CORS(app)  # Enable CORS for Wix & external access
+CORS(app)
 
-# 🚀 Model + Key setup
-MODEL = "nousresearch/hermes-3-llama-3.1-70b"
-API_KEY = os.getenv("OPENROUTER_API_KEY")  # Stored in Render environment
+# --- MODELS ---
+PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"  # Premium model
+FALLBACK_MODEL = "mistralai/mistral-7b-instruct"       # Free fallback model
 
-# 💼 System prompt for a real, professional AI assistant
+API_KEY = os.getenv("OPENROUTER_API_KEY")
+
 SYSTEM_PROMPT = (
     "You are Builduo.ai — an intelligent and experienced AI business strategist. "
     "You think like a branding expert, a web consultant, and a startup advisor. "
@@ -23,8 +24,8 @@ SYSTEM_PROMPT = (
     "You never say 'as an AI' — you speak naturally and confidently as Builduo.ai."
 )
 
-def ask_ai(prompt: str) -> str:
-    """Send a user prompt to the AI model via OpenRouter"""
+# --- Function to Query Model ---
+def ask_ai(prompt: str, model: str) -> str:
     if not API_KEY:
         return "⚠️ Missing API key in environment (OPENROUTER_API_KEY)."
 
@@ -36,7 +37,7 @@ def ask_ai(prompt: str) -> str:
     }
 
     payload = {
-        "model": MODEL,
+        "model": model,
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
@@ -50,31 +51,44 @@ def ask_ai(prompt: str) -> str:
             json=payload,
             timeout=90
         )
+
+        # Handle API-level issues
         if response.status_code != 200:
             return f"⚠️ API Error {response.status_code}: {response.text}"
 
         res_json = response.json()
         reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        if "Insufficient credits" in response.text:
+            return "⚠️ Insufficient credits — please upgrade your plan or try again later."
+
         return reply.strip() or "⚠️ No response from the model."
     except Exception as e:
         return f"⚠️ Request failed: {str(e)}"
 
-
+# --- Chat Endpoint ---
 @app.route("/chat", methods=["POST"])
 def chat():
-    """Main AI chat endpoint"""
     data = request.get_json(force=True)
     prompt = data.get("message", "").strip()
     if not prompt:
         return jsonify({"error": "No message provided"}), 400
 
-    reply = ask_ai(prompt)
+    # Try primary model
+    reply = ask_ai(prompt, PRIMARY_MODEL)
+
+    # Auto fallback if credit issue or Hermes fails
+    if "Insufficient credits" in reply or "API Error" in reply:
+        fallback_reply = ask_ai(prompt, FALLBACK_MODEL)
+        if "⚠️" not in fallback_reply:
+            reply = f"💡 Hermes unavailable — switched to free Mistral model.\n\n{fallback_reply}"
+
     return jsonify({"assistant": "Builduo.ai", "reply": reply})
 
 
+# --- Other Endpoints ---
 @app.route("/", methods=["GET"])
 def index():
-    """Landing page"""
     return (
         "<h2>🤖 Builduo.ai — Your AI Business Partner</h2>"
         "<p>API is active.<br>"
@@ -84,21 +98,27 @@ def index():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint for Render"""
     return jsonify({
         "server": "ok",
-        "model": MODEL,
+        "primary_model": PRIMARY_MODEL,
+        "fallback_model": FALLBACK_MODEL,
         "api_key_found": bool(API_KEY)
     })
 
 
+@app.route("/ping", methods=["GET"])
+def ping():
+    """Ultra-fast uptime endpoint"""
+    return "pong", 200
+
+
 @app.route("/favicon.ico")
 def favicon():
-    """Ignore browser favicon requests"""
     return "", 204
 
 
+# --- Run Server ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    print(f"🚀 Builduo.ai running locally at http://localhost:{port}")
+    print(f"🚀 Builduo.ai running locally on http://localhost:{port}")
     serve(app, host="0.0.0.0", port=port)
