@@ -7,8 +7,8 @@ from waitress import serve
 app = Flask(__name__)
 CORS(app)
 
-PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"
-FALLBACK_MODEL = "mistralai/mistral-7b-instruct"
+PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"     # Premium model
+FALLBACK_MODEL = "huggingfaceh4/zephyr-7b-beta"           # Free reliable model
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 
 SYSTEM_PROMPT = (
@@ -73,11 +73,11 @@ def chat():
 
     reply = ask_ai(prompt, PRIMARY_MODEL)
 
-    # Force fallback if Hermes fails or lacks credits
+    # Fallback to Zephyr if Hermes fails or has no credits
     if reply == "CREDIT_ERROR" or "Insufficient credits" in reply:
         fallback_reply = ask_ai(prompt, FALLBACK_MODEL)
         reply = (
-            f"💡 Hermes unavailable — switched to free Mistral model.\n\n{fallback_reply}"
+            f"💡 Hermes unavailable — switched to Zephyr free model.\n\n{fallback_reply}"
             if fallback_reply != "CREDIT_ERROR"
             else "⚠️ Both models unavailable. Please check your OpenRouter account."
         )
