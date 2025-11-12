@@ -3,27 +3,31 @@ from flask_cors import CORS
 import requests
 import os
 from waitress import serve
+import time
 
 app = Flask(__name__)
 CORS(app)
 
-PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"     # Premium model
-FALLBACK_MODEL = "huggingfaceh4/zephyr-7b-beta"           # Free reliable model
+# --- Model Setup ---
+PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"       # High intelligence (premium)
+FALLBACK_MODEL = "openchat/openchat-8b"                     # Free + stable fallback
 API_KEY = os.getenv("OPENROUTER_API_KEY")
 
+# --- System Persona ---
 SYSTEM_PROMPT = (
-    "You are Builduo.ai — an intelligent and experienced AI business strategist. "
-    "You think like a branding expert, a web consultant, and a startup advisor. "
-    "Your tone is professional but friendly, confident, and human-like. "
-    "When users ask for business ideas, names, or strategy suggestions, "
-    "you provide structured, creative, and realistic insights. "
-    "Give responses in clear bullet points or short paragraphs — "
-    "always actionable, catchy, and modern. "
-    "You never say 'as an AI' — you speak naturally and confidently as Builduo.ai."
+    "You are Builduo.ai — an intelligent, confident, and creative business strategist. "
+    "You combine the insight of a startup founder, the creativity of a branding expert, "
+    "and the practicality of a business consultant. "
+    "You always provide sharp, modern, and realistic ideas — never generic filler. "
+    "If a user asks for ideas, give clear, structured answers with catchy phrasing, "
+    "unique angles, and optional next steps. "
+    "You can use emojis subtly to add personality when appropriate. "
+    "Always sound like a confident professional, not a bot."
 )
 
 
-def ask_ai(prompt: str, model: str) -> str:
+def ask_ai(prompt: str, model: str, retries: int = 2) -> str:
+    """Send a message to OpenRouter with retry + error handling."""
     if not API_KEY:
         return "⚠️ Missing API key in environment (OPENROUTER_API_KEY)."
 
@@ -36,32 +40,46 @@ def ask_ai(prompt: str, model: str) -> str:
 
     payload = {
         "model": model,
+        "temperature": 0.8,   # more creative, but still consistent
+        "max_tokens": 600,    # limit output length to control costs
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": prompt}
         ]
     }
 
-    try:
-        response = requests.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=90
-        )
+    for attempt in range(retries):
+        try:
+            response = requests.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=90
+            )
 
-        text = response.text
-        if "Insufficient credits" in text or "402" in text:
-            return "CREDIT_ERROR"
+            text = response.text
 
-        if response.status_code != 200:
-            return f"⚠️ API Error {response.status_code}: {text}"
+            # Handle credit or missing model issues
+            if "Insufficient credits" in text or "402" in text:
+                return "CREDIT_ERROR"
+            if "No endpoints found" in text or "404" in text:
+                return "MODEL_NOT_FOUND"
 
-        res_json = response.json()
-        reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
-        return reply.strip() or "⚠️ No response from the model."
-    except Exception as e:
-        return f"⚠️ Request failed: {str(e)}"
+            if response.status_code != 200:
+                time.sleep(2)
+                continue  # retry
+
+            res_json = response.json()
+            reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return reply.strip() or "⚠️ Empty response."
+
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2)
+                continue
+            return f"⚠️ Request failed: {str(e)}"
+
+    return "⚠️ Could not reach model after multiple attempts."
 
 
 @app.route("/chat", methods=["POST"])
@@ -73,16 +91,19 @@ def chat():
 
     reply = ask_ai(prompt, PRIMARY_MODEL)
 
-    # Fallback to Zephyr if Hermes fails or has no credits
-    if reply == "CREDIT_ERROR" or "Insufficient credits" in reply:
+    # --- Auto fallback if primary fails ---
+    if reply in ["CREDIT_ERROR", "MODEL_NOT_FOUND"] or "Insufficient credits" in reply:
         fallback_reply = ask_ai(prompt, FALLBACK_MODEL)
         reply = (
-            f"💡 Hermes unavailable — switched to Zephyr free model.\n\n{fallback_reply}"
-            if fallback_reply != "CREDIT_ERROR"
+            f"💡 Hermes unavailable — switched to OpenChat model.\n\n{fallback_reply}"
+            if "⚠️" not in fallback_reply
             else "⚠️ Both models unavailable. Please check your OpenRouter account."
         )
 
-    return jsonify({"assistant": "Builduo.ai", "reply": reply})
+    return jsonify({
+        "assistant": "Builduo.ai",
+        "reply": reply
+    })
 
 
 @app.route("/", methods=["GET"])
