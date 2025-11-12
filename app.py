@@ -2,32 +2,34 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import requests
 import os
-from waitress import serve
 import time
+from waitress import serve
 
 app = Flask(__name__)
 CORS(app)
 
 # --- Model Setup ---
-PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"       # High intelligence (premium)
-FALLBACK_MODEL = "openchat/openchat-8b"                     # Free + stable fallback
+PRIMARY_MODEL = "nousresearch/hermes-3-llama-3.1-70b"
+FALLBACK_MODEL = "mistralai/mistral-7b-instruct"  # stable + active model
 API_KEY = os.getenv("OPENROUTER_API_KEY")
+
+# --- Memory Store (in RAM) ---
+conversations = {}  # {session_id: [{"role": "user"/"assistant", "content": "..."}]}
 
 # --- System Persona ---
 SYSTEM_PROMPT = (
-    "You are Builduo.ai — an intelligent, confident, and creative business strategist. "
-    "You combine the insight of a startup founder, the creativity of a branding expert, "
-    "and the practicality of a business consultant. "
-    "You always provide sharp, modern, and realistic ideas — never generic filler. "
-    "If a user asks for ideas, give clear, structured answers with catchy phrasing, "
-    "unique angles, and optional next steps. "
-    "You can use emojis subtly to add personality when appropriate. "
-    "Always sound like a confident professional, not a bot."
+    "You are Builduo.ai — a highly intelligent, confident, and creative business strategist. "
+    "You act like a professional consultant with expertise in startups, branding, and web strategy. "
+    "You remember recent conversation context to continue naturally. "
+    "Your tone is sharp, friendly, and modern — you think like a real business partner, not a bot. "
+    "Always respond with structured insights, examples, and creative reasoning. "
+    "Give responses that sound like you're brainstorming alongside the user, not preaching. "
+    "Be proactive, inspiring, and precise."
 )
 
 
-def ask_ai(prompt: str, model: str, retries: int = 2) -> str:
-    """Send a message to OpenRouter with retry + error handling."""
+def ask_ai(session_id: str, model: str, retries: int = 2) -> str:
+    """Send the conversation (context included) to OpenRouter."""
     if not API_KEY:
         return "⚠️ Missing API key in environment (OPENROUTER_API_KEY)."
 
@@ -38,14 +40,14 @@ def ask_ai(prompt: str, model: str, retries: int = 2) -> str:
         "X-Title": "Builduo.ai Assistant"
     }
 
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    messages += conversations.get(session_id, [])
+
     payload = {
         "model": model,
-        "temperature": 0.8,   # more creative, but still consistent
-        "max_tokens": 600,    # limit output length to control costs
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt}
-        ]
+        "temperature": 0.85,   # slightly more creative
+        "max_tokens": 700,
+        "messages": messages
     }
 
     for attempt in range(retries):
@@ -56,18 +58,16 @@ def ask_ai(prompt: str, model: str, retries: int = 2) -> str:
                 json=payload,
                 timeout=90
             )
-
             text = response.text
 
-            # Handle credit or missing model issues
+            # Handle common issues
             if "Insufficient credits" in text or "402" in text:
                 return "CREDIT_ERROR"
             if "No endpoints found" in text or "404" in text:
                 return "MODEL_NOT_FOUND"
-
             if response.status_code != 200:
                 time.sleep(2)
-                continue  # retry
+                continue
 
             res_json = response.json()
             reply = res_json.get("choices", [{}])[0].get("message", {}).get("content", "")
@@ -86,23 +86,41 @@ def ask_ai(prompt: str, model: str, retries: int = 2) -> str:
 def chat():
     data = request.get_json(force=True)
     prompt = data.get("message", "").strip()
+    session_id = data.get("session_id", "default_user").strip()
+
     if not prompt:
         return jsonify({"error": "No message provided"}), 400
 
-    reply = ask_ai(prompt, PRIMARY_MODEL)
+    # Initialize conversation for new user
+    if session_id not in conversations:
+        conversations[session_id] = []
 
-    # --- Auto fallback if primary fails ---
+    # Add user message to memory
+    conversations[session_id].append({"role": "user", "content": prompt})
+
+    # Limit memory length (keep last 10 messages)
+    if len(conversations[session_id]) > 10:
+        conversations[session_id] = conversations[session_id][-10:]
+
+    # Generate AI reply
+    reply = ask_ai(session_id, PRIMARY_MODEL)
+
+    # Fallback if Hermes fails
     if reply in ["CREDIT_ERROR", "MODEL_NOT_FOUND"] or "Insufficient credits" in reply:
-        fallback_reply = ask_ai(prompt, FALLBACK_MODEL)
+        fallback_reply = ask_ai(session_id, FALLBACK_MODEL)
         reply = (
-            f"💡 Hermes unavailable — switched to OpenChat model.\n\n{fallback_reply}"
+            f"💡 Hermes unavailable — switched to Mistral model.\n\n{fallback_reply}"
             if "⚠️" not in fallback_reply
             else "⚠️ Both models unavailable. Please check your OpenRouter account."
         )
 
+    # Save assistant reply in memory
+    conversations[session_id].append({"role": "assistant", "content": reply})
+
     return jsonify({
         "assistant": "Builduo.ai",
-        "reply": reply
+        "reply": reply,
+        "memory_length": len(conversations[session_id])
     })
 
 
@@ -111,7 +129,8 @@ def index():
     return (
         "<h2>🤖 Builduo.ai — Your AI Business Partner</h2>"
         "<p>API is active.<br>"
-        "Use <code>POST /chat</code> with JSON {'message': '...'} to get tailored business advice.</p>"
+        "Use <code>POST /chat</code> with JSON {'message': '...', 'session_id': 'user123'} "
+        "to maintain conversation context.</p>"
     )
 
 
@@ -121,6 +140,7 @@ def health():
         "server": "ok",
         "primary_model": PRIMARY_MODEL,
         "fallback_model": FALLBACK_MODEL,
+        "active_conversations": len(conversations),
         "api_key_found": bool(API_KEY)
     })
 
